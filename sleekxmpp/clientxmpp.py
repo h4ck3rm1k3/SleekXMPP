@@ -9,6 +9,7 @@
 from __future__ import absolute_import, unicode_literals
 
 import logging
+logging.basicConfig()
 import base64
 import sys
 import hashlib
@@ -33,7 +34,7 @@ except:
 
 
 log = logging.getLogger(__name__)
-
+log.setLevel(logging.DEBUG)
 
 class ClientXMPP(BaseXMPP):
 

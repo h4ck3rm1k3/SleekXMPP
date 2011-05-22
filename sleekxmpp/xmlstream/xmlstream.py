@@ -10,6 +10,8 @@ from __future__ import with_statement, unicode_literals
 
 import copy
 import logging
+logging.basicConfig()
+
 import socket as Socket
 import ssl
 import sys
@@ -45,7 +47,7 @@ SSL_SUPPORT = True
 
 
 log = logging.getLogger(__name__)
-
+log.setLevel(logging.DEBUG)
 
 class RestartStream(Exception):
     """

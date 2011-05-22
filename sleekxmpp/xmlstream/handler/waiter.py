@@ -7,6 +7,7 @@
 """
 
 import logging
+logging.basicConfig()
 try:
     import queue
 except ImportError:

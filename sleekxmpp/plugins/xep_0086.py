@@ -2,6 +2,7 @@
 from __future__ import with_statement
 from . import base
 import logging
+logging.basicConfig()
 from xml.etree import cElementTree as ET
 import copy
 

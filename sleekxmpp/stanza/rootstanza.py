@@ -7,6 +7,7 @@
 """
 
 import logging
+logging.basicConfig()
 import traceback
 import sys
 
@@ -16,7 +17,7 @@ from sleekxmpp.xmlstream import ET, StanzaBase, register_stanza_plugin
 
 
 log = logging.getLogger(__name__)
-
+log.setLevel(logging.DEBUG)
 
 class RootStanza(StanzaBase):
 

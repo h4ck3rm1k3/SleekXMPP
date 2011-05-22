@@ -9,6 +9,7 @@
 from __future__ import absolute_import
 
 import logging
+logging.basicConfig()
 import base64
 import sys
 import hashlib
@@ -23,7 +24,7 @@ from sleekxmpp.xmlstream.handler import *
 
 
 log = logging.getLogger(__name__)
-
+log.setLevel(logging.DEBUG)
 
 class ComponentXMPP(BaseXMPP):
 

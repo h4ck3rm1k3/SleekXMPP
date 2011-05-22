@@ -1,5 +1,6 @@
 from . import base
 import logging
+logging.basicConfig()
 from xml.etree import cElementTree as ET
 import types
 
