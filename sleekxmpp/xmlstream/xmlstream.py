@@ -311,7 +311,28 @@ class XMLStream(object):
 
     def _connect(self):
         self.stop.clear()
-        self.socket = self.socket_class(Socket.AF_INET, Socket.SOCK_STREAM)
+
+        
+################
+        try:
+
+            for res in Socket.getaddrinfo(self.address[0],  int(self.address[1]), 0, Socket.SOCK_STREAM):
+                #(family, socktype, proto, canonname, sockaddr)
+                af      , socktype, proto, canonname, sa       = res
+                try:
+                    log.debug("got %s %d %s %s %s " % (self.address[0],  int(self.address[1]) , af, socktype, proto))
+                    self.socket = self.socket_class(af, socktype, proto)
+
+                except:
+                    log.debug("error1")
+                    raise 
+        except:
+            log.debug("error2")
+            raise 
+
+
+################
+
         self.socket.settimeout(None)
 
         if self.reconnect_delay is None:
