@@ -9,7 +9,6 @@
 from __future__ import absolute_import
 
 import logging
-logging.basicConfig()
 import base64
 import sys
 import hashlib
@@ -24,7 +23,7 @@ from sleekxmpp.xmlstream.handler import *
 
 
 log = logging.getLogger(__name__)
-log.setLevel(logging.DEBUG)
+
 
 class ComponentXMPP(BaseXMPP):
 
@@ -59,7 +58,7 @@ class ComponentXMPP(BaseXMPP):
             default_ns = 'jabber:client'
         else:
             default_ns = 'jabber:component:accept'
-        BaseXMPP.__init__(self, default_ns)
+        BaseXMPP.__init__(self, jid, default_ns)
 
         self.auto_authorize = None
         self.stream_header = "<stream:stream %s %s to='%s'>" % (
@@ -69,8 +68,8 @@ class ComponentXMPP(BaseXMPP):
         self.stream_footer = "</stream:stream>"
         self.server_host = host
         self.server_port = port
-        self.set_jid(jid)
         self.secret = secret
+
         self.plugin_config = plugin_config
         self.plugin_whitelist = plugin_whitelist
         self.is_component = True
@@ -79,6 +78,8 @@ class ComponentXMPP(BaseXMPP):
                 Callback('Handshake',
                          MatchXPath('{jabber:component:accept}handshake'),
                          self._handle_handshake))
+        self.add_event_handler('presence_probe',
+                               self._handle_probe)
 
     def connect(self):
         """
@@ -130,7 +131,7 @@ class ComponentXMPP(BaseXMPP):
 
         handshake = ET.Element('{jabber:component:accept}handshake')
         handshake.text = hashlib.sha1(pre_hash).hexdigest().lower()
-        self.send_xml(handshake)
+        self.send_xml(handshake, now=True)
 
     def _handle_handshake(self, xml):
         """
@@ -139,4 +140,10 @@ class ComponentXMPP(BaseXMPP):
         Arguments:
             xml -- The reply handshake stanza.
         """
+        self.session_started_event.set()
         self.event("session_start")
+
+    def _handle_probe(self, presence):
+        pto = presence['to'].bare
+        pfrom = presence['from'].bare
+        self.roster[pto][pfrom].handle_probe(presence)

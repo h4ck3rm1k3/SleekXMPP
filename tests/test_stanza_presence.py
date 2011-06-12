@@ -49,7 +49,8 @@ class TestPresenceStanzas(SleekTest):
 
         self.failUnless(happened == [],
             "changed_status event triggered for extra unavailable presence")
-        self.failUnless(c.roster == {},
+        roster = c.roster['crap@wherever']
+        self.failUnless(roster['bill@chadmore.com'].resources == {},
             "Roster updated for superfulous unavailable presence")
 
     def testNickPlugin(self):
@@ -58,7 +59,7 @@ class TestPresenceStanzas(SleekTest):
         p['nick']['nick'] = 'A nickname!'
         self.check(p, """
           <presence>
-            <nick xmlns="http://jabber.org/nick/nick">A nickname!</nick>
+            <nick xmlns="http://jabber.org/protocol/nick">A nickname!</nick>
           </presence>
         """)
 

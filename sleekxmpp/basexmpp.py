@@ -15,7 +15,8 @@ import logging
 import sleekxmpp
 from sleekxmpp import plugins
 
-from sleekxmpp.stanza import Message, Presence, Iq, Error
+import sleekxmpp.roster as roster
+from sleekxmpp.stanza import Message, Presence, Iq, Error, StreamError
 from sleekxmpp.stanza.roster import Roster
 from sleekxmpp.stanza.nick import Nick
 from sleekxmpp.stanza.htmlim import HTMLIM
@@ -78,7 +79,7 @@ class BaseXMPP(XMLStream):
        send_presence_subscribe -- Send a subscription request.
     """
 
-    def __init__(self, default_ns='jabber:client'):
+    def __init__(self, jid='', default_ns='jabber:client'):
         """
         Adapt an XML stream for use with XMPP.
 
@@ -90,27 +91,19 @@ class BaseXMPP(XMLStream):
 
         # To comply with PEP8, method names now use underscores.
         # Deprecated method names are re-mapped for backwards compatibility.
-        self.registerPlugin = self.register_plugin
-        self.makeIq = self.make_iq
-        self.makeIqGet = self.make_iq_get
-        self.makeIqResult = self.make_iq_result
-        self.makeIqSet = self.make_iq_set
-        self.makeIqError = self.make_iq_error
-        self.makeIqQuery = self.make_iq_query
-        self.makeQueryRoster = self.make_query_roster
-        self.makeMessage = self.make_message
-        self.makePresence = self.make_presence
-        self.sendMessage = self.send_message
-        self.sendPresence = self.send_presence
-        self.sendPresenceSubscription = self.send_presence_subscription
-
         self.default_ns = default_ns
         self.stream_ns = 'http://etherx.jabber.org/streams'
 
-        self.boundjid = JID("")
+        self.boundjid = JID(jid)
 
         self.plugin = {}
-        self.roster = {}
+        self.plugin_config = {}
+        self.plugin_whitelist = []
+
+        self.roster = roster.Roster(self)
+        self.roster.add(self.boundjid.bare)
+        self.client_roster = self.roster[self.boundjid.bare]
+
         self.is_component = False
         self.auto_authorize = True
         self.auto_subscribe = True
@@ -126,16 +119,41 @@ class BaseXMPP(XMLStream):
             Callback('Presence',
                      MatchXPath("{%s}presence" % self.default_ns),
                      self._handle_presence))
+        self.register_handler(
+            Callback('Stream Error',
+                     MatchXPath("{%s}error" % self.stream_ns),
+                     self._handle_stream_error))
 
-        self.add_event_handler('presence_subscribe',
-                               self._handle_subscribe)
         self.add_event_handler('disconnected',
                                self._handle_disconnected)
+        self.add_event_handler('presence_available',
+                               self._handle_available)
+        self.add_event_handler('presence_dnd',
+                               self._handle_available)
+        self.add_event_handler('presence_xa',
+                               self._handle_available)
+        self.add_event_handler('presence_chat',
+                               self._handle_available)
+        self.add_event_handler('presence_away',
+                               self._handle_available)
+        self.add_event_handler('presence_unavailable',
+                               self._handle_unavailable)
+        self.add_event_handler('presence_subscribe',
+                               self._handle_subscribe)
+        self.add_event_handler('presence_subscribed',
+                               self._handle_subscribed)
+        self.add_event_handler('presence_unsubscribe',
+                               self._handle_unsubscribe)
+        self.add_event_handler('presence_unsubscribed',
+                               self._handle_unsubscribed)
+        self.add_event_handler('roster_subscription_request',
+                               self._handle_new_subscription)
 
         # Set up the XML stream with XMPP's root stanzas.
-        self.registerStanza(Message)
-        self.registerStanza(Iq)
-        self.registerStanza(Presence)
+        self.register_stanza(Message)
+        self.register_stanza(Iq)
+        self.register_stanza(Presence)
+        self.register_stanza(StreamError)
 
         # Initialize a few default stanza plugins.
         register_stanza_plugin(Iq, Roster)
@@ -243,19 +261,27 @@ class BaseXMPP(XMLStream):
         """Create a Presence stanza associated with this stream."""
         return Presence(self, *args, **kwargs)
 
-    def make_iq(self, id=0, ifrom=None):
+    def make_iq(self, id=0, ifrom=None, ito=None, itype=None, iquery=None):
         """
         Create a new Iq stanza with a given Id and from JID.
 
         Arguments:
-            id    -- An ideally unique ID value for this stanza thread.
-                     Defaults to 0.
-            ifrom -- The from JID to use for this stanza.
+            id     -- An ideally unique ID value for this stanza thread.
+                      Defaults to 0.
+            ifrom  -- The from JID to use for this stanza.
+            ito    -- The destination JID for this stanza.
+            itype  -- The Iq's type, one of: get, set, result, or error.
+            iquery -- Optional namespace for adding a query element.
         """
-        return self.Iq()._set_stanza_values({'id': str(id),
-                                             'from': ifrom})
+        iq = self.Iq()
+        iq['id'] = str(id)
+        iq['to'] = ito
+        iq['from'] = ifrom
+        iq['type'] = itype
+        iq['query'] = iquery
+        return iq
 
-    def make_iq_get(self, queryxmlns=None):
+    def make_iq_get(self, queryxmlns=None, ito=None, ifrom=None, iq=None):
         """
         Create an Iq stanza of type 'get'.
 
@@ -263,21 +289,45 @@ class BaseXMPP(XMLStream):
 
         Arguments:
             queryxmlns -- The namespace of the query to use.
+            ito        -- The destination JID for this stanza.
+            ifrom      -- The from JID to use for this stanza.
+            iq         -- Optionally use an existing stanza instead
+                          of generating a new one.
         """
-        return self.Iq()._set_stanza_values({'type': 'get',
-                                             'query': queryxmlns})
+        if not iq:
+            iq = self.Iq()
+        iq['type'] = 'get'
+        iq['query'] = queryxmlns
+        if ito:
+            iq['to'] = ito
+        if ifrom:
+            iq['from'] = ifrom
+        return iq
 
-    def make_iq_result(self, id):
+    def make_iq_result(self, id=None, ito=None, ifrom=None, iq=None):
         """
         Create an Iq stanza of type 'result' with the given ID value.
 
         Arguments:
-            id -- An ideally unique ID value. May use self.new_id().
+            id    -- An ideally unique ID value. May use self.new_id().
+            ito   -- The destination JID for this stanza.
+            ifrom -- The from JID to use for this stanza.
+            iq    -- Optionally use an existing stanza instead
+                     of generating a new one.
         """
-        return self.Iq()._set_stanza_values({'id': id,
-                                             'type': 'result'})
+        if not iq:
+            iq = self.Iq()
+            if id is None:
+                id = self.new_id()
+            iq['id'] = id
+        iq['type'] = 'result'
+        if ito:
+            iq['to'] = ito
+        if ifrom:
+            iq['from'] = ifrom
+        return iq
 
-    def make_iq_set(self, sub=None):
+    def make_iq_set(self, sub=None, ito=None, ifrom=None, iq=None):
         """
         Create an Iq stanza of type 'set'.
 
@@ -285,15 +335,26 @@ class BaseXMPP(XMLStream):
         stanza's payload.
 
         Arguments:
-            sub -- A stanza or XML object to use as the Iq's payload.
+            sub   -- A stanza or XML object to use as the Iq's payload.
+            ito   -- The destination JID for this stanza.
+            ifrom -- The from JID to use for this stanza.
+            iq    -- Optionally use an existing stanza instead
+                     of generating a new one.
         """
-        iq = self.Iq()._set_stanza_values({'type': 'set'})
+        if not iq:
+            iq = self.Iq()
+        iq['type'] = 'set'
         if sub != None:
             iq.append(sub)
+        if ito:
+            iq['to'] = ito
+        if ifrom:
+            iq['from'] = ifrom
         return iq
 
     def make_iq_error(self, id, type='cancel',
-                      condition='feature-not-implemented', text=None):
+                      condition='feature-not-implemented',
+                      text=None, ito=None, ifrom=None, iq=None):
         """
         Create an Iq stanza of type 'error'.
 
@@ -304,14 +365,24 @@ class BaseXMPP(XMLStream):
             condition -- The error condition.
                          Defaults to 'feature-not-implemented'.
             text      -- A message describing the cause of the error.
+            ito       -- The destination JID for this stanza.
+            ifrom     -- The from JID to use for this stanza.
+            iq        -- Optionally use an existing stanza instead
+                         of generating a new one.
         """
-        iq = self.Iq()._set_stanza_values({'id': id})
-        iq['error']._set_stanza_values({'type': type,
-                                        'condition': condition,
-                                        'text': text})
+        if not iq:
+            iq = self.Iq()
+        iq['id'] = id
+        iq['error']['type'] = type
+        iq['error']['condition'] = condition
+        iq['error']['text'] = text
+        if ito:
+            iq['to'] = ito
+        if ifrom:
+            iq['from'] = ifrom
         return iq
 
-    def make_iq_query(self, iq=None, xmlns=''):
+    def make_iq_query(self, iq=None, xmlns='', ito=None, ifrom=None):
         """
         Create or modify an Iq stanza to use the given
         query namespace.
@@ -320,10 +391,16 @@ class BaseXMPP(XMLStream):
             iq    -- Optional Iq stanza to modify. A new
                      stanza is created otherwise.
             xmlns -- The query's namespace.
+            ito   -- The destination JID for this stanza.
+            ifrom -- The from JID to use for this stanza.
         """
         if not iq:
             iq = self.Iq()
         iq['query'] = xmlns
+        if ito:
+            iq['to'] = ito
+        if ifrom:
+            iq['from'] = ifrom
         return iq
 
     def make_query_roster(self, iq=None):
@@ -516,11 +593,73 @@ class BaseXMPP(XMLStream):
 
     def _handle_disconnected(self, event):
         """When disconnected, reset the roster"""
-        self.roster = {}
+        self.roster.reset()
+
+    def _handle_stream_error(self, error):
+        self.event('stream_error', error)
 
     def _handle_message(self, msg):
         """Process incoming message stanzas."""
         self.event('message', msg)
+
+    def _handle_available(self, presence):
+        pto = presence['to'].bare
+        pfrom = presence['from'].bare
+        self.roster[pto][pfrom].handle_available(presence)
+
+    def _handle_unavailable(self, presence):
+        pto = presence['to'].bare
+        pfrom = presence['from'].bare
+        self.roster[pto][pfrom].handle_unavailable(presence)
+
+    def _handle_new_subscription(self, stanza):
+        """
+        Attempt to automatically handle subscription requests.
+
+        Subscriptions will be approved if the request is from
+        a whitelisted JID, of self.auto_authorize is True. They
+        will be rejected if self.auto_authorize is False. Setting
+        self.auto_authorize to None will disable automatic
+        subscription handling (except for whitelisted JIDs).
+
+        If a subscription is accepted, a request for a mutual
+        subscription will be sent if self.auto_subscribe is True.
+        """
+        roster = self.roster[stanza['to'].bare]
+        item = self.roster[stanza['to'].bare][stanza['from'].bare]
+        if item['whitelisted']:
+            item.authorize()
+        elif roster.auto_authorize:
+            item.authorize()
+            if roster.auto_subscribe:
+                item.subscribe()
+        elif roster.auto_authorize == False:
+            item.unauthorize()
+
+    def _handle_removed_subscription(self, presence):
+        pto = presence['to'].bare
+        pfrom = presence['from'].bare
+        self.roster[pto][pfrom].unauthorize()
+
+    def _handle_subscribe(self, presence):
+        pto = presence['to'].bare
+        pfrom = presence['from'].bare
+        self.roster[pto][pfrom].handle_subscribe(presence)
+
+    def _handle_subscribed(self, presence):
+        pto = presence['to'].bare
+        pfrom = presence['from'].bare
+        self.roster[pto][pfrom].handle_subscribed(presence)
+
+    def _handle_unsubscribe(self, presence):
+        pto = presence['to'].bare
+        pfrom = presence['from'].bare
+        self.roster[pto][pfrom].handle_unsubscribe(presence)
+
+    def _handle_unsubscribed(self, presence):
+        pto = presence['to'].bare
+        pfrom = presence['from'].bare
+        self.roster[pto][pfrom].handle_unsubscribed(presence)
 
     def _handle_presence(self, presence):
         """
@@ -528,6 +667,7 @@ class BaseXMPP(XMLStream):
 
         Update the roster with presence information.
         """
+        logging.debug(presence['type'])
         self.event("presence_%s" % presence['type'], presence)
 
         # Check for changes in subscription state.
@@ -538,97 +678,23 @@ class BaseXMPP(XMLStream):
         elif not presence['type'] in ('available', 'unavailable') and \
              not presence['type'] in presence.showtypes:
             return
-
-        # Strip the information from the stanza.
-        jid = presence['from'].bare
-        resource = presence['from'].resource
-        show = presence['type']
-        status = presence['status']
-        priority = presence['priority']
-
-        was_offline = False
-        got_online = False
-        old_roster = self.roster.get(jid, {}).get(resource, {})
-
-        # Create a new roster entry if needed.
-        if not jid in self.roster:
-            self.roster[jid] = {'groups': [],
-                                'name': '',
-                                'subscription': 'none',
-                                'presence': {},
-                                'in_roster': False}
-
-        # Alias to simplify some references.
-        connections = self.roster[jid]['presence']
-
-        # Determine if the user has just come online.
-        if not resource in connections:
-            if show == 'available' or show in presence.showtypes:
-                got_online = True
-            was_offline = True
-            connections[resource] = {}
-
-        if connections[resource].get('show', 'unavailable') == 'unavailable':
-            was_offline = True
-
-        # Update the roster's state for this JID's resource.
-        connections[resource] = {'show': show,
-                                'status': status,
-                                'priority': priority}
-
-        name = self.roster[jid].get('name', '')
-
-        # Remove unneeded state information after a resource
-        # disconnects. Determine if this was the last connection
-        # for the JID.
-        if show == 'unavailable':
-            log.debug("%s %s got offline" % (jid, resource))
-            del connections[resource]
-
-            if not connections and not self.roster[jid]['in_roster']:
-                del self.roster[jid]
-            if not was_offline:
-                self.event("got_offline", presence)
-            else:
-                return False
-
-        name = '(%s) ' % name if name else ''
-
-        # Presence state has changed.
         self.event("changed_status", presence)
-        if got_online:
-            self.event("got_online", presence)
-        log.debug("STATUS: %s%s/%s[%s]: %s" % (name, jid, resource,
-                                                   show, status))
-
-    def _handle_subscribe(self, presence):
-        """
-        Automatically managage subscription requests.
-
-        Subscription behavior is controlled by the settings
-        self.auto_authorize and self.auto_subscribe.
-
-        auto_auth  auto_sub   Result:
-        True       True       Create bi-directional subsriptions.
-        True       False      Create only directed subscriptions.
-        False      *          Decline all subscriptions.
-        None       *          Disable automatic handling and use
-                              a custom handler.
-        """
-        presence.reply()
-        presence['to'] = presence['to'].bare
-
-        # We are using trinary logic, so conditions have to be
-        # more explicit than usual.
-        if self.auto_authorize == True:
-            presence['type'] = 'subscribed'
-            presence.send()
-            if self.auto_subscribe:
-                presence['type'] = 'subscribe'
-                presence.send()
-        elif self.auto_authorize == False:
-            presence['type'] = 'unsubscribed'
-            presence.send()
 
 # Restore the old, lowercased name for backwards compatibility.
 basexmpp = BaseXMPP
+
+# To comply with PEP8, method names now use underscores.
+# Deprecated method names are re-mapped for backwards compatibility.
+BaseXMPP.registerPlugin = BaseXMPP.register_plugin
+BaseXMPP.makeIq = BaseXMPP.make_iq
+BaseXMPP.makeIqGet = BaseXMPP.make_iq_get
+BaseXMPP.makeIqResult = BaseXMPP.make_iq_result
+BaseXMPP.makeIqSet = BaseXMPP.make_iq_set
+BaseXMPP.makeIqError = BaseXMPP.make_iq_error
+BaseXMPP.makeIqQuery = BaseXMPP.make_iq_query
+BaseXMPP.makeQueryRoster = BaseXMPP.make_query_roster
+BaseXMPP.makeMessage = BaseXMPP.make_message
+BaseXMPP.makePresence = BaseXMPP.make_presence
+BaseXMPP.sendMessage = BaseXMPP.send_message
+BaseXMPP.sendPresence = BaseXMPP.send_presence
+BaseXMPP.sendPresenceSubscription = BaseXMPP.send_presence_subscription

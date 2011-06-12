@@ -9,7 +9,6 @@
 from __future__ import absolute_import, unicode_literals
 
 import logging
-logging.basicConfig()
 import base64
 import sys
 import hashlib
@@ -34,7 +33,7 @@ except:
 
 
 log = logging.getLogger(__name__)
-log.setLevel(logging.DEBUG)
+
 
 class ClientXMPP(BaseXMPP):
 
@@ -67,14 +66,7 @@ class ClientXMPP(BaseXMPP):
                                 when calling register_plugins.
             escape_quotes    -- Deprecated.
         """
-        BaseXMPP.__init__(self, 'jabber:client')
-
-        # To comply with PEP8, method names now use underscores.
-        # Deprecated method names are re-mapped for backwards compatibility.
-        self.updateRoster = self.update_roster
-        self.delRosterItem = self.del_roster_item
-        self.getRoster = self.get_roster
-        self.registerFeature = self.register_feature
+        BaseXMPP.__init__(self, jid, 'jabber:client')
 
         self.set_jid(jid)
         self.password = password
@@ -82,9 +74,6 @@ class ClientXMPP(BaseXMPP):
         self.plugin_config = plugin_config
         self.plugin_whitelist = plugin_whitelist
         self.srv_support = SRV_SUPPORT
-
-        self.session_started_event = threading.Event()
-        self.session_started_event.clear()
 
         self.stream_header = "<stream:stream to='%s' %s %s version='1.0'>" % (
                 self.boundjid.host,
@@ -140,7 +129,7 @@ class ClientXMPP(BaseXMPP):
             log.debug("Session start has taken more than 15 seconds")
             self.disconnect(reconnect=self.auto_reconnect)
 
-    def connect(self, address=tuple()):
+    def connect(self, address=tuple(), reattempt=True, use_tls=True):
         """
         Connect to the XMPP server.
 
@@ -149,7 +138,11 @@ class ClientXMPP(BaseXMPP):
         will be used.
 
         Arguments:
-            address -- A tuple containing the server's host and port.
+            address   -- A tuple containing the server's host and port.
+            reattempt -- If True, reattempt the connection if an
+                         error occurs. Defaults to True.
+            use_tls   -- Indicates if TLS should be used for the
+                         connection. Defaults to True.
         """
         self.session_started_event.clear()
         if not address or len(address) < 2:
@@ -163,11 +156,13 @@ class ClientXMPP(BaseXMPP):
                 log.debug("Since no address is supplied," + \
                               "attempting SRV lookup.")
                 try:
-                    xmpp_srv = "_xmpp-client._tcp.%s" % self.server
+                    xmpp_srv = "_xmpp-client._tcp.%s" % self.boundjid.host
                     answers = dns.resolver.query(xmpp_srv, dns.rdatatype.SRV)
                 except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
                     log.debug("No appropriate SRV record found." + \
                                   " Using JID server name.")
+                except (dns.exception.Timeout,):
+                    log.debug("DNS resolution timed out.")
                 else:
                     # Pick a random server, weighted by priority.
 
@@ -191,7 +186,8 @@ class ClientXMPP(BaseXMPP):
             # If all else fails, use the server from the JID.
             address = (self.boundjid.host, 5222)
 
-        return XMLStream.connect(self, address[0], address[1], use_tls=True)
+        return XMLStream.connect(self, address[0], address[1],
+                                 use_tls=use_tls, reattempt=reattempt)
 
     def register_feature(self, mask, pointer, breaker=False):
         """
@@ -207,7 +203,8 @@ class ClientXMPP(BaseXMPP):
                                          pointer,
                                          breaker))
 
-    def update_roster(self, jid, name=None, subscription=None, groups=[]):
+    def update_roster(self, jid, name=None, subscription=None, groups=[],
+                            block=True, timeout=None, callback=None):
         """
         Add or change a roster item.
 
@@ -218,12 +215,24 @@ class ClientXMPP(BaseXMPP):
                             'to', 'from', 'both', or 'none'. If set
                             to 'remove', the entry will be deleted.
             groups       -- The roster groups that contain this item.
+            block        -- Specify if the roster request will block
+                            until a response is received, or a timeout
+                            occurs. Defaults to True.
+            timeout      -- The length of time (in seconds) to wait
+                            for a response before continuing if blocking
+                            is used. Defaults to self.response_timeout.
+            callback     -- Optional reference to a stream handler function.
+                            Will be executed when the roster is received.
+                            Implies block=False.
         """
-        iq = self.Iq()._set_stanza_values({'type': 'set'})
+        iq = self.Iq()
+        iq['type'] = 'set'
         iq['roster']['items'] = {jid: {'name': name,
                                        'subscription': subscription,
                                        'groups': groups}}
-        response = iq.send()
+        response = iq.send(block, timeout, callback)
+        if response in [False, None] or not isinstance(response, Iq):
+            return response
         return response['type'] == 'result'
 
     def del_roster_item(self, jid):
@@ -236,11 +245,33 @@ class ClientXMPP(BaseXMPP):
         """
         return self.update_roster(jid, subscription='remove')
 
-    def get_roster(self):
-        """Request the roster from the server."""
-        iq = self.Iq()._set_stanza_values({'type': 'get'}).enable('roster')
-        response = iq.send()
-        self._handle_roster(response, request=True)
+    def get_roster(self, block=True, timeout=None, callback=None):
+        """
+        Request the roster from the server.
+
+        Arguments:
+            block    -- Specify if the roster request will block until a
+                        response is received, or a timeout occurs.
+                        Defaults to True.
+            timeout  -- The length of time (in seconds) to wait for a response
+                        before continuing if blocking is used.
+                        Defaults to self.response_timeout.
+            callback -- Optional reference to a stream handler function. Will
+                        be executed when the roster is received.
+                        Implies block=False.
+        """
+        iq = self.Iq()
+        iq['type'] = 'get'
+        iq.enable('roster')
+        response = iq.send(block, timeout, callback)
+
+        if response == False:
+            self.event('roster_timeout')
+
+        if response in [False, None] or not isinstance(response, Iq):
+            return response
+        else:
+            return self._handle_roster(response, request=True)
 
     def _handle_stream_features(self, features):
         """
@@ -271,13 +302,15 @@ class ClientXMPP(BaseXMPP):
         Arguments:
             xml -- The STARTLS proceed element.
         """
-        if not self.authenticated and self.ssl_support:
+        if not self.use_tls:
+            return False
+        elif not self.authenticated and self.ssl_support:
             tls_ns = 'urn:ietf:params:xml:ns:xmpp-tls'
             self.add_handler("<proceed xmlns='%s' />" % tls_ns,
                              self._handle_tls_start,
                              name='TLS Proceed',
                              instream=True)
-            self.send_xml(xml)
+            self.send_xml(xml, now=True)
             return True
         else:
             log.warning("The module tlslite is required to log in" +\
@@ -301,7 +334,8 @@ class ClientXMPP(BaseXMPP):
         Arguments:
             xml -- The SASL mechanisms stanza.
         """
-        if '{urn:ietf:params:xml:ns:xmpp-tls}starttls' in self.features:
+        if self.use_tls and \
+           '{urn:ietf:params:xml:ns:xmpp-tls}starttls' in self.features:
             return False
 
         log.debug("Starting SASL Auth")
@@ -332,11 +366,13 @@ class ClientXMPP(BaseXMPP):
 
                 self.send("<auth xmlns='%s' mechanism='PLAIN'>%s</auth>" % (
                     sasl_ns,
-                    auth))
+                    auth),
+                    now=True)
             elif 'sasl:ANONYMOUS' in self.features and not self.boundjid.user:
                 self.send("<auth xmlns='%s' mechanism='%s' />" % (
                     sasl_ns,
-                    'ANONYMOUS'))
+                    'ANONYMOUS'),
+                    now=True)
             else:
                 log.error("No appropriate login method.")
                 self.disconnect()
@@ -379,13 +415,13 @@ class ClientXMPP(BaseXMPP):
             res.text = self.boundjid.resource
             xml.append(res)
         iq.append(xml)
-        response = iq.send()
+        response = iq.send(now=True)
 
         bind_ns = 'urn:ietf:params:xml:ns:xmpp-bind'
         self.set_jid(response.xml.find('{%s}bind/{%s}jid' % (bind_ns,
                                                              bind_ns)).text)
         self.bound = True
-        log.info("Node set to: %s" % self.boundjid.fulljid)
+        log.info("Node set to: %s" % self.boundjid.full)
         session_ns = 'urn:ietf:params:xml:ns:xmpp-session'
         if "{%s}session" % session_ns not in self.features or self.bindfail:
             log.debug("Established Session")
@@ -402,7 +438,7 @@ class ClientXMPP(BaseXMPP):
         """
         if self.authenticated and self.bound:
             iq = self.makeIqSet(xml)
-            response = iq.send()
+            response = iq.send(now=True)
             log.debug("Established Session")
             self.sessionstarted = True
             self.session_started_event.set()
@@ -422,16 +458,26 @@ class ClientXMPP(BaseXMPP):
         """
         if iq['type'] == 'set' or (iq['type'] == 'result' and request):
             for jid in iq['roster']['items']:
-                if not jid in self.roster:
-                    self.roster[jid] = {'groups': [],
-                                        'name': '',
-                                        'subscription': 'none',
-                                        'presence': {},
-                                        'in_roster': True}
-                self.roster[jid].update(iq['roster']['items'][jid])
+                item = iq['roster']['items'][jid]
+                roster = self.roster[iq['to'].bare]
+                roster[jid]['name'] = item['name']
+                roster[jid]['groups'] = item['groups']
+                roster[jid]['from'] = item['subscription'] in ['from', 'both']
+                roster[jid]['to'] = item['subscription'] in ['to', 'both']
+                roster[jid]['pending_out'] = (item['ask'] == 'subscribe')
+            self.event('roster_received', iq)
 
         self.event("roster_update", iq)
         if iq['type'] == 'set':
             iq.reply()
             iq.enable('roster')
             iq.send()
+        return True
+
+
+# To comply with PEP8, method names now use underscores.
+# Deprecated method names are re-mapped for backwards compatibility.
+ClientXMPP.updateRoster = ClientXMPP.update_roster
+ClientXMPP.delRosterItem = ClientXMPP.del_roster_item
+ClientXMPP.getRoster = ClientXMPP.get_roster
+ClientXMPP.registerFeature = ClientXMPP.register_feature
